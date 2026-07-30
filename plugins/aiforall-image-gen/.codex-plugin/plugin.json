@@ -1,0 +1,24 @@
+{
+  "name": "aiforall-image-gen",
+  "version": "1.1.0",
+  "description": "aiforall.me 官方 Codex 生图插件，支持 gpt-image-2 灵活尺寸、编辑、透明背景、流式预览与批量工作流。",
+  "author": {
+    "name": "aiforall.me"
+  },
+  "homepage": "https://aiforall.me/",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "aiforall-image-gen",
+    "shortDescription": "Image API 生图、编辑、透明背景和批量工作流。",
+    "longDescription": "aiforall.me 官方 Codex 图像插件。默认使用 gpt-image-2，支持灵活尺寸、最多 16 张编辑输入、mask、自适应色键与可选 rembg 本地兜底、gpt-image-1.5 专用 Key 池、SSE 预览、最多 10 个 worker、断点续跑和失败补洞。",
+    "developerName": "aiforall.me",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "brandColor": "#2563EB",
+    "composerIcon": "./assets/composer-icon.png",
+    "logo": "./assets/plugin-logo.png",
+    "logoDark": "./assets/plugin-logo-dark.png",
+    "websiteURL": "https://aiforall.me/",
+    "defaultPrompt": "使用 aiforall-image-gen 生成一张图片。"
+  }
+}

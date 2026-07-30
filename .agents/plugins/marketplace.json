@@ -1,0 +1,20 @@
+{
+  "name": "aiforall-plugins",
+  "interface": {
+    "displayName": "aiforall.me Plugins"
+  },
+  "plugins": [
+    {
+      "name": "aiforall-image-gen",
+      "source": {
+        "source": "local",
+        "path": "./plugins/aiforall-image-gen"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
