@@ -56,6 +56,17 @@ test("AIFORALL_API_KEY is masked and marked as the environment source", async ()
   assert.doesNotMatch(result.stdout, /sk-aiforall-test-secret/);
 });
 
+test("request timeout defaults to at least 300 seconds and allows a longer override", async () => {
+  const clamped = await runCli(["--help"], { env: { AIFORALL_REQUEST_TIMEOUT_SECONDS: "30" } });
+  assert.equal(clamped.code, 0, clamped.stderr);
+  assert.match(clamped.stdout, /request timeout: 300s/);
+
+  const extended = await runCli(["--help"], { env: { AIFORALL_REQUEST_TIMEOUT_SECONDS: "420" } });
+  assert.equal(extended.code, 0, extended.stderr);
+  assert.match(extended.stdout, /request timeout: 420s/);
+  assert.match(extended.stdout, /shell command timeout: at least 480s/);
+});
+
 test("generation uses the aiforall Images route and current-project output directory", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "aiforall-node-test-"));
   let captured = null;
@@ -119,6 +130,23 @@ test("invalid gpt-image-2 sizes fail before a paid request", async () => {
   const result = await runCli(["--prompt", "invalid", "--size", "1279x720"]);
   assert.notEqual(result.code, 0);
   assert.match(`${result.stdout}\n${result.stderr}`, /multiples of 16/);
+});
+
+test("connection loss after submission is no-retry and warns about upstream completion", async () => {
+  let requests = 0;
+  await withMockServer((request) => {
+    requests += 1;
+    request.socket.destroy();
+  }, async (apiRoot) => {
+    const result = await runCli(["--prompt", "accepted before disconnect", "--no-resize"], {
+      env: { AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.notEqual(result.code, 0);
+    assert.match(`${result.stdout}\n${result.stderr}`, /\[NO-RETRY\].*fetch failed/i);
+    assert.match(`${result.stdout}\n${result.stderr}`, /upstream may still have completed/i);
+    assert.match(`${result.stdout}\n${result.stderr}`, /check aiforall\.me request history/i);
+  });
+  assert.equal(requests, 1);
 });
 
 test("gpt-image-2 transparent mode performs local alpha extraction", async () => {

@@ -32,7 +32,10 @@ const MAX_EDIT_SOURCES = 16;
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 const MAX_RETRIES = 3;
 const RETRY_BACKOFF_MS = 15_000;
-const REQUEST_TIMEOUT_MS = 180_000;
+const MIN_REQUEST_TIMEOUT_MS = 300_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
+const REQUEST_TIMEOUT_MS = resolveRequestTimeoutMs(process.env.AIFORALL_REQUEST_TIMEOUT_SECONDS);
+const COMMAND_TIMEOUT_SECONDS = Math.max(360, Math.ceil(REQUEST_TIMEOUT_MS / 1000) + 60);
 const SUPPORTED_RATIOS = [
   "1:1",
   "3:2",
@@ -50,6 +53,12 @@ const SUPPORTED_RATIOS = [
   "3:1",
   "1:3",
 ];
+
+function resolveRequestTimeoutMs(value) {
+  const requestedSeconds = Number(value);
+  if (!Number.isFinite(requestedSeconds) || requestedSeconds <= 0) return DEFAULT_REQUEST_TIMEOUT_MS;
+  return Math.max(MIN_REQUEST_TIMEOUT_MS, Math.round(requestedSeconds * 1000));
+}
 
 const SIZE_MATRIX = {
   "1K": {
@@ -744,8 +753,13 @@ function noRetryRequestError(error, requestKind) {
   if (message.startsWith("[POSTPROCESS]")) {
     return `[NO-RETRY] ${message.slice("[POSTPROCESS]".length).trim()}`;
   }
-  const timeout = error?.name === "AbortError" ? `timeout after ${REQUEST_TIMEOUT_MS / 1000}s` : message;
-  return `[NO-RETRY] ${requestKind} request state is unknown: ${timeout}`;
+  const causeCode = error?.cause?.code ? String(error.cause.code) : "";
+  const causeMessage = error?.cause?.message ? String(error.cause.message) : "";
+  const cause = causeCode || causeMessage
+    ? ` (${[causeCode, causeMessage].filter(Boolean).join(": ")})`
+    : "";
+  const detail = error?.name === "AbortError" ? `timeout after ${REQUEST_TIMEOUT_MS / 1000}s` : `${message}${cause}`;
+  return `[NO-RETRY] ${requestKind} request state is unknown: ${detail}. The upstream may still have completed the image after the local connection ended. Check aiforall.me request history before submitting another paid request.`;
 }
 
 function isRetryableError(error) {
@@ -3493,6 +3507,7 @@ CONFIG
 FIRST USE
   runtime: Node.js 18+; Python 3 + Pillow for image validation, resizing, masks, and chroma-key transparency
   credentials: AIFORALL_API_KEY for gpt-image-2; AIFORALL_IMAGE15_API_KEY or JSON AIFORALL_IMAGE15_API_KEYS for gpt-image-1.5
+  request timeout: ${REQUEST_TIMEOUT_MS / 1000}s; AIFORALL_REQUEST_TIMEOUT_SECONDS may increase it but cannot reduce it below ${MIN_REQUEST_TIMEOUT_MS / 1000}s
   create one or more image-generation group keys at https://aiforall.me/
   recommended: one key/worker; add distinct keys only for concurrent independent images
   maximum: ${MAX_WORKERS} workers; multiple workers can use substantial memory and are not recommended on low-spec computers
@@ -3547,6 +3562,7 @@ DEFAULTS
   output: <current working directory>/aiforall-image-gen
   worker pool: enabled, one worker per task, auto parallel for independent tasks, max workers ${MAX_WORKERS}
   adaptive: on, concurrency ${DEFAULTS.concurrency}, retries ${MAX_RETRIES}, worker cooldown ${DEFAULT_WORKER_COOLDOWN_MS / 1000}s
+  request timeout: ${REQUEST_TIMEOUT_MS / 1000}s (minimum ${MIN_REQUEST_TIMEOUT_MS / 1000}s); shell command timeout: at least ${COMMAND_TIMEOUT_SECONDS}s
   notice: ${API_SIZE_LIMIT_NOTICE}
   workflow batch edit: generic fixed refs + variable item refs + user templates, auto resume and repair passes
   nail stress test: compatibility preset for ${WORKFLOW_NAIL_PRESET}; do not assume product type in generic workflow

@@ -18,6 +18,7 @@ node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs"
 3. Run `--get-config`. Never display or store a full Key in chat, source files, logs, or commits.
 4. Use `AIFORALL_API_KEY` for `gpt-image-2`. Use `AIFORALL_IMAGE15_API_KEY`, JSON `AIFORALL_IMAGE15_API_KEYS`, or `--add-native-worker-key` only for `gpt-image-1.5`.
 5. Before a batch, warn that accepted cloud requests may still be billed after a local crash, then run `--dry-run` and `--limit 1` where supported.
+6. When invoking the script through a shell tool, set the command execution timeout to at least 360 seconds and at least 60 seconds longer than the configured API timeout. The plugin's API timeout defaults to 300 seconds; `AIFORALL_REQUEST_TIMEOUT_SECONDS` may increase it but never reduce it below 300 seconds.
 
 ## Prompt planning
 
@@ -52,7 +53,7 @@ Keep `--native-transparent` only as an explicit experimental capability probe af
 
 ## Batch and workers
 
-Use `--count` only for variants of one prompt and `--batch`/`--batch-inline` for distinct prompts. A multi-reference edit remains one worker task; `--batch-edit` makes each source an independent task. Keep `[NO-RETRY]` requests out of automatic retries because their billing state is unknown. Never enable preview for batch or edit requests.
+Use `--count` only for variants of one prompt and `--batch`/`--batch-inline` for distinct prompts. A multi-reference edit remains one worker task; `--batch-edit` makes each source an independent task. Keep `[NO-RETRY]` requests out of automatic retries because their billing state is unknown. For timeout, `fetch failed`, socket loss, or a terminated response, explain that upstream may still have completed the image and check aiforall.me request history before considering another paid request. Never enable preview for batch or edit requests.
 
 ## Output display
 

@@ -34,6 +34,14 @@ $env:AIFORALL_API_KEY="<YOUR_AIFORALL_IMAGE_KEY>"
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --get-config
 ```
 
+单次 Images API 请求默认等待 `300` 秒。网络较慢时可继续调高，但不能降低到 300 秒以下：
+
+```powershell
+$env:AIFORALL_REQUEST_TIMEOUT_SECONDS="420"
+```
+
+Codex 或其他 shell 调用器应将整条命令的执行超时设置为至少 `360` 秒；如果调高了 API 超时，则命令超时应至少为 API 超时加 `60` 秒，为响应下载、精确缩放和透明后处理预留时间。
+
 也可以保存到权限受限的 `~/.codex/aiforall-image-gen-config.json`：
 
 ```powershell
@@ -111,7 +119,7 @@ node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --batch-inline "提
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --workflow-batch-edit --fixed-ref "ref.png" --item-dir "items" --template-inline "生成商品展示图" --limit 1 --dry-run
 ```
 
-批量任务必须先以 `--limit 1 --concurrency 1 --dry-run` 验证数量。请求状态未知时标记 `[NO-RETRY]`，避免已经受理的付费请求被自动重发。
+批量任务必须先以 `--limit 1 --concurrency 1 --dry-run` 验证数量。超时、`fetch failed` 或连接断开时请求状态未知，插件标记 `[NO-RETRY]` 且不会自动重发，因为上游可能已经完成图片并产生计费。应先在 aiforall.me 请求历史中查找结果，再决定是否提交新请求。
 
 ## 开发验证
 
