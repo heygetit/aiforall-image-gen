@@ -119,7 +119,7 @@ node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --batch-inline "提
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --workflow-batch-edit --fixed-ref "ref.png" --item-dir "items" --template-inline "生成商品展示图" --limit 1 --dry-run
 ```
 
-批量任务必须先以 `--limit 1 --concurrency 1 --dry-run` 验证数量。超时、`fetch failed` 或连接断开时请求状态未知，插件标记 `[NO-RETRY]` 且不会自动重发，因为上游可能已经完成图片并产生计费。应先在 aiforall.me 请求历史中查找结果，再决定是否提交新请求。
+批量任务必须先以 `--limit 1 --concurrency 1 --dry-run` 验证数量。如果连接结束前已经收到可验证的完整 JSON 图片结果或 SSE completed 图片事件，插件会保存该图片并报告 `[recovered]`，不会重发请求。若没有收到完整结果，超时、`fetch failed` 或连接断开仍会标记 `[NO-RETRY]`，因为上游可能已经完成图片并产生计费；应先在 aiforall.me 请求历史中查找结果，再决定是否提交新请求。
 
 ## 开发验证
 

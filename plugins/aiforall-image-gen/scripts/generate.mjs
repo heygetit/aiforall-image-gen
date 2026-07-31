@@ -1345,16 +1345,49 @@ function createPreviewPath() {
   return join(previewDir, `preview_${timestamp()}_${Math.random().toString(36).slice(2, 6)}.png`);
 }
 
+async function readJsonResponseRecoverably(res) {
+  const reader = res.body?.getReader();
+  if (!reader) return { data: await res.json(), recoveredAfterDisconnect: false };
+
+  const decoder = new TextDecoder();
+  let text = "";
+  let readError = null;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch (error) {
+    readError = error;
+  }
+  text += decoder.decode();
+
+  try {
+    return {
+      data: JSON.parse(text),
+      recoveredAfterDisconnect: !!readError,
+      recoveryError: readError?.message || null,
+    };
+  } catch (parseError) {
+    if (readError) throw readError;
+    throw parseError;
+  }
+}
+
 async function consumeImageApiStream(res, options = {}) {
   const contentType = String(res.headers.get("content-type") || "").toLowerCase();
   if (!contentType.includes("text/event-stream")) {
-    const data = await res.json();
+    const jsonResult = await readJsonResponseRecoverably(res);
+    const data = jsonResult.data;
     const base64 = walkForImageApiBase64(data) || await imageApiResultBase64(data);
     return {
       base64,
       partialImageEvents: 0,
       eventCounts: { json: 1 },
       previewPath: null,
+      recoveredAfterDisconnect: jsonResult.recoveredAfterDisconnect,
+      recoveryError: jsonResult.recoveryError || null,
     };
   }
 
@@ -1364,8 +1397,10 @@ async function consumeImageApiStream(res, options = {}) {
   const eventCounts = {};
   let buffer = "";
   let finalBase64 = "";
+  let completedImageReceived = false;
   let latestPartial = "";
   let partialImageEvents = 0;
+  let readError = null;
   const previewPath = options.preview ? createPreviewPath() : null;
 
   const handleEvent = (event) => {
@@ -1386,33 +1421,50 @@ async function consumeImageApiStream(res, options = {}) {
       }
       return;
     }
-    if (base64) finalBase64 = base64;
+    if (base64) {
+      finalBase64 = base64;
+      if (type.includes("completed") || type.includes("final")) completedImageReceived = true;
+    }
+  };
+
+  const handleLine = (line) => {
+    if (!line.startsWith("data:")) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") return;
+    try {
+      handleEvent(JSON.parse(payload));
+    } catch (error) {
+      if (error instanceof SyntaxError) return;
+      throw error;
+    }
   };
 
   while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (error) {
+      readError = error;
+      break;
+    }
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() || "";
-    for (const line of lines) {
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-      try {
-        handleEvent(JSON.parse(payload));
-      } catch (error) {
-        if (error instanceof SyntaxError) continue;
-        throw error;
-      }
-    }
+    for (const line of lines) handleLine(line);
   }
+  buffer += decoder.decode();
+  if (buffer.trim()) handleLine(buffer);
+
+  if (readError && !completedImageReceived) throw readError;
 
   return {
     base64: finalBase64 || latestPartial,
     partialImageEvents,
     eventCounts,
     previewPath,
+    recoveredAfterDisconnect: !!readError,
+    recoveryError: readError?.message || null,
   };
 }
 
@@ -1425,6 +1477,8 @@ function imageStreamLogSummary(result, size) {
     eventCounts: result.eventCounts || {},
     finalBase64Characters: typeof result.base64 === "string" ? result.base64.length : 0,
     previewSaved: !!result.previewPath,
+    recoveredAfterDisconnect: result.recoveredAfterDisconnect === true,
+    recoveryError: result.recoveryError || null,
   };
 }
 
@@ -1448,9 +1502,8 @@ async function generateImageViaImagesApiOnce(apiKey, prompt, size, outputDir, op
       error: modelAccessError(await parseErrorResponse(res), normalizeModel(options.model, options.nativeTransparent === true)),
     };
 
-    const streamed = preview ? await consumeImageApiStream(res, options) : null;
-    const data = preview ? null : await res.json();
-    const base64 = preview ? streamed?.base64 : await imageApiResultBase64(data);
+    const responseResult = await consumeImageApiStream(res, options);
+    const base64 = responseResult.base64;
     const saved = saveBase64Image(base64, outputDir, "img", null, resize ? size : null, {
       outputFormat: options.outputFormat,
       transparent: options.transparent === true || options.nativeTransparent === true,
@@ -1471,10 +1524,20 @@ async function generateImageViaImagesApiOnce(apiKey, prompt, size, outputDir, op
           : "Images API response did not contain an image result",
       };
     }
-    if (options.rawLogPath && streamed) {
-      saveTextArtifact(options.rawLogPath, JSON.stringify(imageStreamLogSummary(streamed, size), null, 2));
+    if (responseResult.recoveredAfterDisconnect) {
+      console.warn("[recovered] The complete image result was received before the connection ended; saved it without submitting another request.");
     }
-    return { ok: true, elapsed, transport: preview ? "images-stream" : "images", ...saved, previewPath: streamed?.previewPath || null };
+    if (options.rawLogPath && preview) {
+      saveTextArtifact(options.rawLogPath, JSON.stringify(imageStreamLogSummary(responseResult, size), null, 2));
+    }
+    return {
+      ok: true,
+      elapsed,
+      transport: preview ? "images-stream" : "images",
+      ...saved,
+      previewPath: responseResult.previewPath || null,
+      recoveredAfterDisconnect: responseResult.recoveredAfterDisconnect === true,
+    };
   } catch (error) {
     return {
       ok: false,
@@ -1562,8 +1625,13 @@ async function editImageViaImagesApiOnce(apiKey, sources, prompt, size, outputDi
       };
     }
 
-    const data = await res.json();
-    if (rawLogPath) saveTextArtifact(rawLogPath, JSON.stringify(imageApiLogSummary(data), null, 2));
+    const jsonResult = await readJsonResponseRecoverably(res);
+    const data = jsonResult.data;
+    if (rawLogPath) saveTextArtifact(rawLogPath, JSON.stringify({
+      ...imageApiLogSummary(data),
+      recoveredAfterDisconnect: jsonResult.recoveredAfterDisconnect,
+      recoveryError: jsonResult.recoveryError || null,
+    }, null, 2));
     const base64 = await imageApiResultBase64(data);
     const saved = options.savePath
       ? saveBase64ImageToPath(base64, options.savePath, resize ? size : null, {
@@ -1588,7 +1656,10 @@ async function editImageViaImagesApiOnce(apiKey, sources, prompt, size, outputDi
       });
     const elapsed = Date.now() - start;
     if (!saved) return { ok: false, elapsed, error: "Images API response did not contain an edited image", sourceName };
-    return { ok: true, elapsed, ...saved, sourceName };
+    if (jsonResult.recoveredAfterDisconnect) {
+      console.warn("[recovered] The complete edited image result was received before the connection ended; saved it without submitting another request.");
+    }
+    return { ok: true, elapsed, ...saved, sourceName, recoveredAfterDisconnect: jsonResult.recoveredAfterDisconnect };
   } catch (error) {
     return {
       ok: false,

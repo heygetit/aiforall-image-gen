@@ -7,7 +7,8 @@ import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const script = join(repoRoot, "plugins", "aiforall-image-gen", "scripts", "generate.mjs");
+const script = process.env.AIFORALL_IMAGE_GEN_SCRIPT
+  || join(repoRoot, "plugins", "aiforall-image-gen", "scripts", "generate.mjs");
 const onePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 const transparentPixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4//8/AwAI/AL+p5qgoAAAAABJRU5ErkJggg==";
 const chromaFixture = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAkklEQVR4nO3aUQmAAAAD0fMwgjawfyIbaAfNICJy6PsfDPa7gYM0iZM4iZM4iZM4iZM4iZM4iZM4iZM4iRuvBtZ54knLtn9rAYmTOImTOImTOImTOImTOImTOImTOImTOImTOImTOImTOImTOImTOImTOImTuOH/C71M4iRO4iRO4iRO4iRO4iRO4iRO4ny7wF0n0qEFf5X4FJQAAAAASUVORK5CYII=";
@@ -145,6 +146,102 @@ test("connection loss after submission is no-retry and warns about upstream comp
     assert.match(`${result.stdout}\n${result.stderr}`, /\[NO-RETRY\].*fetch failed/i);
     assert.match(`${result.stdout}\n${result.stderr}`, /upstream may still have completed/i);
     assert.match(`${result.stdout}\n${result.stderr}`, /check aiforall\.me request history/i);
+  });
+  assert.equal(requests, 1);
+});
+
+test("complete JSON image is recovered when the connection ends before HTTP framing completes", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aiforall-json-recovery-test-"));
+  let requests = 0;
+  await withMockServer((_request, response) => {
+    requests += 1;
+    const payload = JSON.stringify({ data: [{ b64_json: onePixelPng }] });
+    response.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload) + 100,
+    });
+    response.write(payload, () => response.socket.destroy());
+  }, async (apiRoot) => {
+    const result = await runCli(["--prompt", "recover completed JSON", "--no-resize"], {
+      cwd,
+      env: { AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /\[recovered\].*without submitting another request/i);
+    assert.ok(readdirSync(join(cwd, "aiforall-image-gen")).some((name) => name.endsWith(".png")));
+  });
+  assert.equal(requests, 1);
+});
+
+test("completed SSE image is recovered when the stream disconnects before DONE", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aiforall-sse-recovery-test-"));
+  let requests = 0;
+  await withMockServer((_request, response) => {
+    requests += 1;
+    const event = `data: ${JSON.stringify({ type: "image_generation.completed", b64_json: onePixelPng })}\n\n`;
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Content-Length": Buffer.byteLength(event) + 100,
+    });
+    response.write(event, () => response.socket.destroy());
+  }, async (apiRoot) => {
+    const result = await runCli(["--prompt", "recover completed stream", "--preview", "--no-resize"], {
+      cwd,
+      env: { AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /\[recovered\].*without submitting another request/i);
+    assert.ok(readdirSync(join(cwd, "aiforall-image-gen")).some((name) => name.endsWith(".png")));
+  });
+  assert.equal(requests, 1);
+});
+
+test("explicit SSE error after a completed event is not treated as transport recovery", async () => {
+  let requests = 0;
+  await withMockServer((_request, response) => {
+    requests += 1;
+    const events = [
+      `data: ${JSON.stringify({ type: "image_generation.completed", b64_json: onePixelPng })}`,
+      `data: ${JSON.stringify({ type: "error", message: "upstream rejected final result" })}`,
+      "",
+    ].join("\n");
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(events);
+  }, async (apiRoot) => {
+    const result = await runCli(["--prompt", "explicit stream error", "--preview", "--no-resize"], {
+      env: { AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.notEqual(result.code, 0);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /\[recovered\]/i);
+    assert.match(`${result.stdout}\n${result.stderr}`, /upstream rejected final result/i);
+  });
+  assert.equal(requests, 1);
+});
+
+test("complete edit JSON is recovered without resubmitting the paid request", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aiforall-edit-recovery-test-"));
+  const imagePath = join(cwd, "source.png");
+  writeFileSync(imagePath, Buffer.from(onePixelPng, "base64"));
+  let requests = 0;
+  await withMockServer(async (request, response) => {
+    requests += 1;
+    for await (const _chunk of request) {
+      // Wait until the multipart upload is accepted before simulating a response disconnect.
+    }
+    const payload = JSON.stringify({ data: [{ b64_json: onePixelPng }] });
+    response.writeHead(200, {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(payload) + 100,
+    });
+    response.write(payload, () => response.socket.destroy());
+  }, async (apiRoot) => {
+    const result = await runCli(["--edit", "--image", imagePath, "--prompt", "recover completed edit", "--no-resize"], {
+      cwd,
+      env: { AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(`${result.stdout}\n${result.stderr}`, /\[recovered\].*without submitting another request/i);
+    assert.ok(readdirSync(join(cwd, "aiforall-image-gen")).some((name) => name.endsWith(".png")));
   });
   assert.equal(requests, 1);
 });

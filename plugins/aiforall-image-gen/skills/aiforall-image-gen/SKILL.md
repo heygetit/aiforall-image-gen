@@ -53,7 +53,7 @@ Keep `--native-transparent` only as an explicit experimental capability probe af
 
 ## Batch and workers
 
-Use `--count` only for variants of one prompt and `--batch`/`--batch-inline` for distinct prompts. A multi-reference edit remains one worker task; `--batch-edit` makes each source an independent task. Keep `[NO-RETRY]` requests out of automatic retries because their billing state is unknown. For timeout, `fetch failed`, socket loss, or a terminated response, explain that upstream may still have completed the image and check aiforall.me request history before considering another paid request. Never enable preview for batch or edit requests.
+Use `--count` only for variants of one prompt and `--batch`/`--batch-inline` for distinct prompts. A multi-reference edit remains one worker task; `--batch-edit` makes each source an independent task. The script recovers and saves a complete JSON image result or SSE completed image received before a transport disconnect, reports `[recovered]`, and never resubmits that request. Keep `[NO-RETRY]` requests out of automatic retries because their billing state is unknown. For timeout, `fetch failed`, socket loss, or a terminated response without a recoverable complete result, explain that upstream may still have completed the image and check aiforall.me request history before considering another paid request. Never enable preview for batch or edit requests.
 
 ## Output display
 
