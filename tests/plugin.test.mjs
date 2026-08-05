@@ -96,6 +96,44 @@ test("generation uses the aiforall Images route and current-project output direc
   assert.ok(readdirSync(outputDir).some((name) => name.endsWith(".png")));
 });
 
+test("one API key can run multiple generation requests concurrently", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aiforall-single-key-concurrency-test-"));
+  let active = 0;
+  let peak = 0;
+  let requests = 0;
+  const authorizations = [];
+  let cliResult = null;
+  await withMockServer(async (request, response) => {
+    requests += 1;
+    active += 1;
+    peak = Math.max(peak, active);
+    authorizations.push(request.headers.authorization);
+    for await (const _chunk of request) {
+      // Consume the full request before holding the response open.
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 75));
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: [{ b64_json: onePixelPng }] }));
+    active -= 1;
+  }, async (apiRoot) => {
+    cliResult = await runCli([
+      "--batch-inline", "parallel one", "parallel two", "parallel three",
+      "--concurrency", "3", "--key-concurrency", "3", "--no-resize",
+    ], {
+      cwd,
+      env: {
+        AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot,
+        USERPROFILE: cwd,
+      },
+    });
+  });
+  assert.equal(cliResult.code, 0, `${cliResult.stdout}\n${cliResult.stderr}`);
+  assert.equal(requests, 3);
+  assert.equal(peak, 3);
+  assert.deepEqual(new Set(authorizations), new Set(["Bearer sk-aiforall-test-secret"]));
+  assert.match(cliResult.stdout, /peak concurrency=3/);
+});
+
 test("multipart edit sends ordered images, roles, and a validated mask", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "aiforall-edit-test-"));
   const imageOne = join(cwd, "one.png");

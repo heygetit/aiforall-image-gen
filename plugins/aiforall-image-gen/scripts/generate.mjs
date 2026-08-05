@@ -25,6 +25,8 @@ const CONFIG_PATH = join(homedir(), ".codex", "aiforall-image-gen-config.json");
 const MAX_GENERATION_COUNT = 9;
 const MAX_REPEAT = 50;
 const MAX_CONCURRENCY = 10;
+const DEFAULT_KEY_CONCURRENCY = 2;
+const MAX_KEY_CONCURRENCY = MAX_CONCURRENCY;
 const MAX_WORKERS = 10;
 const MAX_EDIT_COUNT = 4;
 const MAX_BATCH_PROMPTS = 20;
@@ -120,6 +122,7 @@ const DEFAULTS = {
   ratio: "1:1",
   count: 1,
   concurrency: 3,
+  keyConcurrency: DEFAULT_KEY_CONCURRENCY,
 };
 const API_SIZE_LIMIT_NOTICE = "图像请求规格与实际计费以 aiforall.me 控制台为准。";
 const WORKER_ID_PREFIX = "worker-";
@@ -181,6 +184,13 @@ function normalizeWorkerModels(models, fallback = [IMAGE_MODEL]) {
   return normalized.length > 0 ? normalized : [...fallback];
 }
 
+function normalizeWorkerConcurrency(value, fallback = DEFAULT_KEY_CONCURRENCY) {
+  const parsed = Number(value);
+  const fallbackValue = Number.isFinite(Number(fallback)) ? Number(fallback) : DEFAULT_KEY_CONCURRENCY;
+  const requested = Number.isFinite(parsed) ? parsed : fallbackValue;
+  return Math.max(1, Math.min(Math.floor(requested), MAX_KEY_CONCURRENCY));
+}
+
 function workerSupportsModel(worker, model) {
   return normalizeWorkerModels(worker?.models).includes(model);
 }
@@ -216,10 +226,11 @@ function normalizeWorkerRecord(rawWorker, normalizedWorkers, index, now) {
     enabled: rawWorker.enabled !== false,
     createdAt: String(rawWorker.createdAt || "").trim() || now,
     models: normalizeWorkerModels(rawWorker.models),
+    maxInFlight: normalizeWorkerConcurrency(rawWorker.maxInFlight ?? rawWorker.slots),
   };
 }
 
-function createWorkerRecord(apiKey, name, existingWorkers = [], models = [IMAGE_MODEL]) {
+function createWorkerRecord(apiKey, name, existingWorkers = [], models = [IMAGE_MODEL], maxInFlight = DEFAULT_KEY_CONCURRENCY) {
   const id = nextWorkerId(existingWorkers);
   return {
     id,
@@ -228,6 +239,7 @@ function createWorkerRecord(apiKey, name, existingWorkers = [], models = [IMAGE_
     enabled: true,
     createdAt: new Date().toISOString(),
     models: normalizeWorkerModels(models),
+    maxInFlight: normalizeWorkerConcurrency(maxInFlight),
   };
 }
 
@@ -247,6 +259,7 @@ function normalizeConfigShape(config) {
       enabled: true,
       createdAt: now,
       models: [IMAGE_MODEL],
+      maxInFlight: DEFAULT_KEY_CONCURRENCY,
     });
     changed = true;
   }
@@ -264,6 +277,8 @@ function normalizeConfigShape(config) {
       || worker.createdAt !== rawWorker.createdAt
       || worker.apiKey !== rawWorker.apiKey
       || JSON.stringify(worker.models) !== JSON.stringify(rawWorker.models)
+      || worker.maxInFlight !== normalizeWorkerConcurrency(rawWorker.maxInFlight ?? rawWorker.slots)
+      || !("maxInFlight" in rawWorker)
     ) {
       changed = true;
     }
@@ -365,7 +380,10 @@ function getConfiguredWorkers(config, options = {}) {
 }
 
 function getEnabledWorkersOrExit(config, model = IMAGE_MODEL) {
-  const workers = getConfiguredWorkers(config, { requireEnabled: true, model });
+  const workers = getConfiguredWorkers(config, { requireEnabled: true, model })
+    .map((worker) => config?.keyConcurrency == null
+      ? worker
+      : { ...worker, maxInFlight: normalizeWorkerConcurrency(config.keyConcurrency) });
   if (workers.length === 0) {
     const credential = model === NATIVE_TRANSPARENT_MODEL
       ? "AIFORALL_IMAGE15_API_KEY/AIFORALL_IMAGE15_API_KEYS or --add-native-worker-key"
@@ -410,6 +428,7 @@ function summarizeWorker(worker, index) {
     密钥预览: previewKey(worker.apiKey),
     创建时间: worker.createdAt || null,
     模型: normalizeWorkerModels(worker.models),
+    并发槽位: normalizeWorkerConcurrency(worker.maxInFlight),
     来源: worker.source || "本地配置",
   };
 }
@@ -448,7 +467,7 @@ function printWorkerList(config) {
   const enabled = workers.filter((worker) => worker.enabled !== false).length;
   console.log(`密钥列表：共 ${workers.length} 个，已启用 ${enabled} 个，最多 ${MAX_WORKERS} 个`);
   workers.forEach((worker, index) => {
-    console.log(`${index + 1}. ${worker.name} [${worker.id}] ${worker.enabled !== false ? "已启用" : "已停用"} 模型=${normalizeWorkerModels(worker.models).join(",")} 密钥=${previewKey(worker.apiKey)}`);
+    console.log(`${index + 1}. ${worker.name} [${worker.id}] ${worker.enabled !== false ? "已启用" : "已停用"} 模型=${normalizeWorkerModels(worker.models).join(",")} 槽位=${normalizeWorkerConcurrency(worker.maxInFlight)} 密钥=${previewKey(worker.apiKey)}`);
   });
   if (workers.length > MAX_WORKERS) console.log(workerLimitErrorMessage(workers.length));
 }
@@ -1676,9 +1695,13 @@ async function editImageOnce(apiKey, sources, prompt, size, outputDir, options =
 }
 
 function createWorkerSession(worker) {
+  const maxInFlight = normalizeWorkerConcurrency(worker?.maxInFlight);
   return {
     ...worker,
-    busy: false,
+    maxInFlight,
+    effectiveMaxInFlight: maxInFlight,
+    activeRequests: 0,
+    capacityRestoreAt: 0,
     fatal: false,
     disabledUntil: 0,
     lastError: null,
@@ -1689,6 +1712,7 @@ function createWorkerSession(worker) {
       failed: 0,
       retries: 0,
       cooldowns: 0,
+      rateLimits: 0,
       fatalErrors: 0,
     },
   };
@@ -1706,9 +1730,37 @@ function schedulerCooldownMs(sessions, retryDelayMs, cooldownMs) {
   return activeWorkerCount(sessions) > 1 ? cooldownMs : retryDelayMs;
 }
 
+function isRateLimitError(error) {
+  const text = String(error || "").toLowerCase();
+  return [
+    "http 429",
+    "rate limit",
+    "too many requests",
+    "account pool busy",
+    "no available account",
+    "overloaded",
+    "model concurrency",
+    "concurrency limit",
+  ].some((pattern) => text.includes(pattern));
+}
+
+function refreshWorkerCapacity(worker, now = Date.now()) {
+  if (!worker || worker.effectiveMaxInFlight >= worker.maxInFlight) return;
+  if (worker.capacityRestoreAt > now) return;
+  worker.effectiveMaxInFlight += 1;
+  worker.capacityRestoreAt = worker.effectiveMaxInFlight < worker.maxInFlight
+    ? now + DEFAULT_WORKER_COOLDOWN_MS
+    : 0;
+}
+
+function workerHasCapacity(worker, now = Date.now()) {
+  refreshWorkerCapacity(worker, now);
+  return worker.activeRequests < worker.effectiveMaxInFlight;
+}
+
 function findAvailableWorker(sessions) {
   const now = Date.now();
-  const candidates = sessions.filter((worker) => worker.enabled !== false && !worker.fatal && !worker.busy && worker.disabledUntil <= now);
+  const candidates = sessions.filter((worker) => worker.enabled !== false && !worker.fatal && worker.disabledUntil <= now && workerHasCapacity(worker, now));
   if (candidates.length === 0) return null;
   candidates.sort((left, right) => {
     if (left.stats.assigned !== right.stats.assigned) return left.stats.assigned - right.stats.assigned;
@@ -1721,10 +1773,14 @@ function findAvailableWorker(sessions) {
 function nextAvailableWorkerDelayMs(sessions) {
   const now = Date.now();
   const delays = sessions
-    .filter((worker) => worker.enabled !== false && !worker.fatal && !worker.busy && worker.disabledUntil > now)
+    .filter((worker) => worker.enabled !== false && !worker.fatal && worker.disabledUntil > now)
     .map((worker) => worker.disabledUntil - now);
-  if (delays.length === 0) return null;
-  return Math.max(1, Math.min(...delays));
+  const capacityDelays = sessions
+    .filter((worker) => worker.enabled !== false && !worker.fatal && worker.disabledUntil <= now && worker.activeRequests >= worker.effectiveMaxInFlight && worker.capacityRestoreAt > now)
+    .map((worker) => worker.capacityRestoreAt - now);
+  const allDelays = [...delays, ...capacityDelays];
+  if (allDelays.length === 0) return null;
+  return Math.max(1, Math.min(...allDelays));
 }
 
 function createTaskStates(tasks) {
@@ -1768,7 +1824,7 @@ function hasRemainingGroupTasks(taskStates, groupKey) {
 function availableWorkerSessions(sessions) {
   const now = Date.now();
   return sessions
-    .filter((worker) => worker.enabled !== false && !worker.fatal && !worker.busy && worker.disabledUntil <= now)
+    .filter((worker) => worker.enabled !== false && !worker.fatal && worker.disabledUntil <= now && workerHasCapacity(worker, now))
     .sort((left, right) => {
       if (left.stats.assigned !== right.stats.assigned) return left.stats.assigned - right.stats.assigned;
       if (left.disabledUntil !== right.disabledUntil) return left.disabledUntil - right.disabledUntil;
@@ -1846,7 +1902,7 @@ function requeueTask(taskState, delayMs = 0) {
 function printWorkerStats(report) {
   console.log(`Workers: total=${report.workerCount}, enabled=${report.enabledWorkerCount}, used=${report.activeWorkerCount}, peak concurrency=${report.peakConcurrency}`);
   for (const worker of report.workerStats) {
-    console.log(`- ${worker.name} [${worker.id}] assigned=${worker.assigned} success=${worker.success} failed=${worker.failed} retries=${worker.retries} cooldowns=${worker.cooldowns} fatalErrors=${worker.fatalErrors}${worker.lastError ? ` lastError="${worker.lastError}"` : ""}`);
+    console.log(`- ${worker.name} [${worker.id}] slots=${worker.activeRequests}/${worker.effectiveMaxInFlight} (max=${worker.maxInFlight}) assigned=${worker.assigned} success=${worker.success} failed=${worker.failed} retries=${worker.retries} cooldowns=${worker.cooldowns} rateLimits=${worker.rateLimits} fatalErrors=${worker.fatalErrors}${worker.lastError ? ` lastError="${worker.lastError}"` : ""}`);
   }
 }
 
@@ -1863,6 +1919,7 @@ async function runWorkerTaskQueue(workers, tasks, options = {}) {
     outputDir = null,
     returnReport = false,
     stickyTaskGroups = false,
+    keyConcurrency = null,
   } = options;
 
   const configuredWorkers = Array.isArray(workers) ? workers.filter((worker) => worker?.apiKey) : [];
@@ -1896,12 +1953,16 @@ async function runWorkerTaskQueue(workers, tasks, options = {}) {
     return returnReport ? report : report.exitCode;
   }
 
-  const sessions = enabledWorkers.map(createWorkerSession);
+  const sessions = enabledWorkers.map((worker) => createWorkerSession({
+    ...worker,
+    maxInFlight: keyConcurrency == null ? worker.maxInFlight : keyConcurrency,
+  }));
   const taskStates = createTaskStates(tasks);
   const groupAssignments = new Map();
   const runningGroups = new Set();
   const started = Date.now();
-  const initialConcurrency = Math.max(1, Math.min(Number(concurrency) || DEFAULTS.concurrency, total || 1, enabledWorkers.length, MAX_CONCURRENCY));
+  const availableSlots = sessions.reduce((sum, worker) => sum + worker.effectiveMaxInFlight, 0);
+  const initialConcurrency = Math.max(1, Math.min(Number(concurrency) || DEFAULTS.concurrency, total || 1, availableSlots, MAX_CONCURRENCY));
   let activeRuns = 0;
   let peakConcurrency = 0;
   let retryCount = 0;
@@ -1943,7 +2004,7 @@ async function runWorkerTaskQueue(workers, tasks, options = {}) {
         continue;
       }
 
-      worker.busy = true;
+      worker.activeRequests += 1;
       worker.used = true;
       worker.stats.assigned += 1;
       activeRuns += 1;
@@ -1963,7 +2024,7 @@ async function runWorkerTaskQueue(workers, tasks, options = {}) {
       }
 
       activeRuns -= 1;
-      worker.busy = false;
+      worker.activeRequests = Math.max(0, worker.activeRequests - 1);
       const groupKey = taskGroupKey(taskState);
       if (groupKey) runningGroups.delete(groupKey);
 
@@ -1998,6 +2059,13 @@ async function runWorkerTaskQueue(workers, tasks, options = {}) {
       } else if (retryable && adaptive) {
         worker.disabledUntil = Date.now() + schedulerCooldownMs(sessions, retryDelayMs, cooldownMs);
         worker.stats.cooldowns += 1;
+        if (isRateLimitError(result.error)) {
+          worker.effectiveMaxInFlight = Math.max(1, Math.ceil(worker.effectiveMaxInFlight / 2));
+          worker.capacityRestoreAt = worker.effectiveMaxInFlight < worker.maxInFlight
+            ? Date.now() + Math.max(cooldownMs, DEFAULT_WORKER_COOLDOWN_MS)
+            : 0;
+          worker.stats.rateLimits += 1;
+        }
       }
 
       const canRetry = !taskFatal && (retryable || workerFatal) && taskState.retries < maxRetries && hasPotentialWorkerSessions(sessions);
@@ -2066,7 +2134,11 @@ async function runWorkerTaskQueue(workers, tasks, options = {}) {
       failed: worker.stats.failed,
       retries: worker.stats.retries,
       cooldowns: worker.stats.cooldowns,
+      rateLimits: worker.stats.rateLimits,
       fatalErrors: worker.stats.fatalErrors,
+      maxInFlight: worker.maxInFlight,
+      effectiveMaxInFlight: worker.effectiveMaxInFlight,
+      activeRequests: worker.activeRequests,
       lastError: worker.lastError,
     })),
     exitCode: failed.length > 0 ? 1 : 0,
@@ -3279,6 +3351,49 @@ async function runAdaptiveSelfTest() {
     && singleReport.peakConcurrency === 1;
 
   console.log("");
+  console.log("Worker pool self-test: one API key should run multiple independent tasks up to its slot capacity.");
+  let sameKeyActive = 0;
+  let sameKeyPeak = 0;
+  const sameKeyReport = await runWorkerTaskQueue([mockWorkers[0]], Array.from({ length: 4 }, (_, index) => ({
+    prompt: `same-key-${index + 1}`,
+  })), {
+    concurrency: 4,
+    retryDelayMs: 0,
+    returnReport: true,
+    runTask: async (worker, task) => {
+      sameKeyActive += 1;
+      sameKeyPeak = Math.max(sameKeyPeak, sameKeyActive);
+      await sleep(10);
+      sameKeyActive -= 1;
+      return { ok: true, elapsed: 10, path: `mock://${worker.id}-${task.prompt}.png`, fileSize: "1.00KB" };
+    },
+  });
+  const sameKeyOk = sameKeyReport.exitCode === 0
+    && sameKeyReport.success === 4
+    && sameKeyReport.initialConcurrency === DEFAULT_KEY_CONCURRENCY
+    && sameKeyReport.peakConcurrency === DEFAULT_KEY_CONCURRENCY
+    && sameKeyPeak === DEFAULT_KEY_CONCURRENCY
+    && sameKeyReport.workerStats[0]?.maxInFlight === DEFAULT_KEY_CONCURRENCY;
+
+  console.log("");
+  console.log("Worker pool self-test: explicit rate limiting should reduce one key's effective slots.");
+  const rateLimitReport = await runWorkerTaskQueue([mockWorkers[0]], [
+    { prompt: "rate-limit" },
+  ], {
+    concurrency: 2,
+    retryDelayMs: 0,
+    cooldownMs: 0,
+    returnReport: true,
+    runTask: async (_worker, _task, context) => context.attempt === 1
+      ? { ok: false, elapsed: 5, error: "HTTP 429: Too Many Requests" }
+      : { ok: true, elapsed: 5, path: "mock://rate-limit-recovered.png", fileSize: "1.00KB" },
+  });
+  const rateLimitOk = rateLimitReport.exitCode === 0
+    && rateLimitReport.retryCount === 1
+    && rateLimitReport.workerStats[0]?.rateLimits === 1
+    && rateLimitReport.workerStats[0]?.effectiveMaxInFlight === 1;
+
+  console.log("");
   console.log("Worker pool self-test: retryable worker failure should cool the worker and move the task.");
   const retryCalls = new Map();
   const retryableReport = await runWorkerTaskQueue(mockWorkers, Array.from({ length: 5 }, (_, index) => ({
@@ -3346,9 +3461,9 @@ async function runAdaptiveSelfTest() {
     && allFatalReport.failed === 3
     && !!allFatalReport.exhaustedReason;
 
-  if (!singleOk || !retryableOk || !authFatalOk || !allFatalOk) {
+  if (!singleOk || !sameKeyOk || !rateLimitOk || !retryableOk || !authFatalOk || !allFatalOk) {
     console.error("Worker pool self-test FAILED.");
-    console.error(JSON.stringify({ singleReport, retryableReport, authFatalReport, allFatalReport }, null, 2));
+    console.error(JSON.stringify({ singleReport, sameKeyReport, rateLimitReport, retryableReport, authFatalReport, allFatalReport }, null, 2));
     return 1;
   }
 
@@ -3474,6 +3589,9 @@ function parseArgs(argv) {
     } else if (value === "--remove-worker" && argv[i + 1]) args.flags.removeWorker = argv[++i];
     else if (value === "--enable-worker" && argv[i + 1]) args.flags.enableWorker = argv[++i];
     else if (value === "--disable-worker" && argv[i + 1]) args.flags.disableWorker = argv[++i];
+    else if (value === "--set-key-concurrency" && argv[i + 2]) {
+      args.flags.setKeyConcurrency = { worker: argv[++i], value: Number.parseInt(argv[++i], 10) };
+    }
     else if (value === "--set-quick-mode") args.flags.setQuickMode = true;
     else if (value === "--set-batch-mode") args.flags.setBatchMode = true;
     else if (value === "--prompt" && argv[i + 1]) args.prompts.push(argv[++i]);
@@ -3495,6 +3613,7 @@ function parseArgs(argv) {
     else if (value === "--keep-source") args.flags.keepSource = true;
     else if (value === "--force") args.flags.force = true;
     else if (value === "--concurrency" && argv[i + 1]) args.flags.concurrency = Number.parseInt(argv[++i], 10);
+    else if (value === "--key-concurrency" && argv[i + 1]) args.flags.keyConcurrency = Number.parseInt(argv[++i], 10);
     else if (value === "--transport" && argv[i + 1]) args.flags.transport = argv[++i];
     else if (value === "--responses") args.flags.transport = "responses";
     else if (value === "--images-api") args.flags.transport = "images";
@@ -3569,6 +3688,7 @@ CONFIG
   --add-worker-key <ANOTHER_AIFORALL_IMAGE_KEY> [--worker-name <name>]
   --add-native-worker-key <GPT_IMAGE_15_KEY> [--worker-name <name>]
   --set-worker-key <worker> <key>
+  --set-key-concurrency <worker> <1..${MAX_KEY_CONCURRENCY}>
   --remove-worker <worker>
   --enable-worker <worker>
   --disable-worker <worker>
@@ -3580,16 +3700,16 @@ FIRST USE
   credentials: AIFORALL_API_KEY for gpt-image-2; AIFORALL_IMAGE15_API_KEY or JSON AIFORALL_IMAGE15_API_KEYS for gpt-image-1.5
   request timeout: ${REQUEST_TIMEOUT_MS / 1000}s; AIFORALL_REQUEST_TIMEOUT_SECONDS may increase it but cannot reduce it below ${MIN_REQUEST_TIMEOUT_MS / 1000}s
   create one or more image-generation group keys at https://aiforall.me/
-  recommended: one key/worker; add distinct keys only for concurrent independent images
+  recommended: one key supports ${DEFAULT_KEY_CONCURRENCY} concurrent requests by default; add distinct keys for more aggregate capacity
   maximum: ${MAX_WORKERS} workers; multiple workers can use substantial memory and are not recommended on low-spec computers
 
 GENERATE
   --prompt "..." [--size auto|WxH|--aspect R] [--quality low|medium|high|auto] [--count 1..${MAX_GENERATION_COUNT}] [--preview|--no-preview] [--no-resize]
   --prompt "..." --transparent [--key-color #00ff00] [--no-rembg] [--rembg-model u2net] [--keep-source]
   --prompt "..." --native-transparent [--output-format png|webp]  experimental gpt-image-1.5 native-alpha capability probe; currently rejected by aiforall.me
-  --prompt "..." --repeat 1..${MAX_REPEAT} [--concurrency 1..${MAX_CONCURRENCY}] [--adaptive|--no-adaptive]
-  --batch prompts.json [--ratio R|--aspect R] [--concurrency N] [--no-resize]
-  --batch-inline "prompt 1" "prompt 2" ... [--ratio R|--aspect R] [--concurrency N] [--no-resize]
+  --prompt "..." --repeat 1..${MAX_REPEAT} [--concurrency 1..${MAX_CONCURRENCY}] [--key-concurrency 1..${MAX_KEY_CONCURRENCY}] [--adaptive|--no-adaptive]
+  --batch prompts.json [--ratio R|--aspect R] [--concurrency N] [--key-concurrency N] [--no-resize]
+  --batch-inline "prompt 1" "prompt 2" ... [--ratio R|--aspect R] [--concurrency N] [--key-concurrency N] [--no-resize]
 
 EDIT
   --edit --image path.png [--image-role identity] --prompt "..." [--mask mask.png] [--size auto|WxH] [--count 1..${MAX_EDIT_COUNT}]
@@ -3631,8 +3751,8 @@ DEFAULTS
   native alpha: aiforall.me currently rejects background=transparent for ${NATIVE_TRANSPARENT_MODEL}; --native-transparent probes this capability and never falls back automatically
   request quality: ${DEFAULTS.quality}; low, medium, high, or auto
   output: <current working directory>/aiforall-image-gen
-  worker pool: enabled, one worker per task, auto parallel for independent tasks, max workers ${MAX_WORKERS}
-  adaptive: on, concurrency ${DEFAULTS.concurrency}, retries ${MAX_RETRIES}, worker cooldown ${DEFAULT_WORKER_COOLDOWN_MS / 1000}s
+  worker pool: enabled, each key has ${DEFAULT_KEY_CONCURRENCY} request slots by default, max workers ${MAX_WORKERS}
+  adaptive: on, concurrency ${DEFAULTS.concurrency}, key slots ${DEFAULT_KEY_CONCURRENCY}, retries ${MAX_RETRIES}, worker cooldown ${DEFAULT_WORKER_COOLDOWN_MS / 1000}s
   request timeout: ${REQUEST_TIMEOUT_MS / 1000}s (minimum ${MIN_REQUEST_TIMEOUT_MS / 1000}s); shell command timeout: at least ${COMMAND_TIMEOUT_SECONDS}s
   notice: ${API_SIZE_LIMIT_NOTICE}
   workflow batch edit: generic fixed refs + variable item refs + user templates, auto resume and repair passes
@@ -3704,6 +3824,13 @@ async function main() {
   } catch (error) {
     console.error(`ERROR: ${error?.message || String(error)}`);
     process.exit(1);
+  }
+  if (flags.keyConcurrency != null) {
+    if (!Number.isFinite(flags.keyConcurrency) || flags.keyConcurrency < 1) {
+      console.error(`ERROR: --key-concurrency must be an integer from 1 to ${MAX_KEY_CONCURRENCY}.`);
+      process.exit(1);
+    }
+    config = { ...config, keyConcurrency: normalizeWorkerConcurrency(flags.keyConcurrency) };
   }
   let requestedTransport;
   try {
@@ -3786,6 +3913,24 @@ async function main() {
     };
     saveConfig(mutableConfig);
     console.log(`Worker key updated: ${resolved.worker.name} [${resolved.worker.id}] -> ${previewKey(flags.setWorkerKey.key)}`);
+    return;
+  }
+
+  if (flags.setKeyConcurrency) {
+    const mutableConfig = storedConfig;
+    const resolved = resolveWorkerReference(mutableConfig, flags.setKeyConcurrency.worker);
+    if (!resolved) {
+      console.error(`ERROR: Worker "${flags.setKeyConcurrency.worker}" was not found.`);
+      process.exit(1);
+    }
+    if (!Number.isFinite(flags.setKeyConcurrency.value) || flags.setKeyConcurrency.value < 1) {
+      console.error(`ERROR: --set-key-concurrency requires an integer from 1 to ${MAX_KEY_CONCURRENCY}.`);
+      process.exit(1);
+    }
+    const maxInFlight = normalizeWorkerConcurrency(flags.setKeyConcurrency.value);
+    mutableConfig.workers[resolved.index] = { ...mutableConfig.workers[resolved.index], maxInFlight };
+    saveConfig(mutableConfig);
+    console.log(`Worker concurrency saved: ${resolved.worker.name} [${resolved.worker.id}] slots=${maxInFlight}`);
     return;
   }
 

@@ -2,7 +2,7 @@
 
 `aiforall.me` 官方 Codex 图像生成插件。默认通过
 `https://aiforall.me/v1/images/generations` 和 `/v1/images/edits`
-调用 `gpt-image-2`，支持灵活尺寸、图像编辑、透明背景、SSE 预览、批量任务、断点续跑和最多 10 个 worker。
+调用 `gpt-image-2`，支持灵活尺寸、图像编辑、透明背景、SSE 预览、批量任务、断点续跑、单 Key 多槽位并发和最多 10 个 worker。
 
 ## 环境
 
@@ -48,7 +48,22 @@ Codex 或其他 shell 调用器应将整条命令的执行超时设置为至少 
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --set-key "<YOUR_AIFORALL_IMAGE_KEY>"
 ```
 
-`AIFORALL_API_KEY` 优先于本地配置中的主 worker；最多可配置 10 个独立 Key。多 worker 只并行独立任务，不会加速单张图片。
+`AIFORALL_API_KEY` 优先于本地配置中的主 worker；最多可配置 10 个独立 Key。每个 Key 默认有 2 个并发槽位，因此一个 Key 也可以并行处理多个独立任务：
+
+```powershell
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" `
+  --batch-inline "提示词一" "提示词二" "提示词三" `
+  --concurrency 3 --key-concurrency 3
+```
+
+`--concurrency` 控制本次任务的总并发，`--key-concurrency` 覆盖本次运行中每个 Key 的槽位数。也可以持久化单个 worker 的槽位：
+
+```powershell
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --list-workers
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --set-key-concurrency default 3
+```
+
+服务端允许同 Key 并发，但实际吞吐仍受余额、渠道和上游模型限流影响。插件遇到明确的 429 或并发拒绝时会暂时降低该 Key 的有效槽位，成功后逐步恢复；超时、断流和 `fetch failed` 等状态未知错误仍不会自动重发。
 
 `gpt-image-1.5` 使用独立的 native Key 池，避免普通分组 Key 被误用：
 
@@ -114,8 +129,8 @@ node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --edit --model gpt-
 ## 批量与安全
 
 ```powershell
-node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --prompt "产品海报" --count 2 --concurrency 1
-node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --batch-inline "提示词一" "提示词二" --concurrency 1
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --prompt "产品海报" --count 2 --concurrency 2
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --batch-inline "提示词一" "提示词二" --concurrency 2
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --workflow-batch-edit --fixed-ref "ref.png" --item-dir "items" --template-inline "生成商品展示图" --limit 1 --dry-run
 ```
 
