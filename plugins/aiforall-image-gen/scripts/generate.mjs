@@ -20,7 +20,8 @@ const SUPPORTED_OUTPUT_FORMATS = new Set(["png", "jpeg", "webp"]);
 const PYTHON_IMAGE_TOOL = join(dirname(fileURLToPath(import.meta.url)), "image_tools.py");
 const DEFAULT_TRANSPORT = "images";
 const TRANSPORTS = new Set(["auto", "images"]);
-const CONFIG_PATH = join(homedir(), ".codex", "aiforall-image-gen-config.json");
+const CODEX_HOME = process.env.CODEX_HOME || join(homedir(), ".codex");
+const CONFIG_PATH = join(CODEX_HOME, "aiforall-image-gen-config.json");
 
 const MAX_GENERATION_COUNT = 9;
 const MAX_REPEAT = 50;

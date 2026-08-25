@@ -20,6 +20,16 @@ python -c "import PIL; print(PIL.__version__)"
 
 ## 安装
 
+从 GitHub 拉取后推荐使用可复刻安装流程（marketplace 会保存到用户目录，不会落入 `.codex/.tmp`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-codex.ps1
+```
+
+macOS/Linux：`sh ./scripts/install-codex.sh`。升级后恢复使用 `restore-codex`，完整说明见 [`docs/codex-setup.md`](docs/codex-setup.md)。
+
+手动安装仍可使用：
+
 ```powershell
 codex plugin marketplace add heygetit/aiforall-image-gen
 codex plugin add aiforall-image-gen@aiforall-plugins
