@@ -16,7 +16,7 @@ node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs"
 1. Require Node.js 18+.
 2. Check Python 3 and Pillow with `python -c "import PIL"`.
 3. Run `--get-config`. Never display or store a full Key in chat, source files, logs, or commits.
-4. Use `AIFORALL_API_KEY` for `gpt-image-2`. Use `AIFORALL_IMAGE15_API_KEY`, JSON `AIFORALL_IMAGE15_API_KEYS`, or `--add-native-worker-key` only for `gpt-image-1.5`.
+4. Use `AIFORALL_API_KEY` for `gpt-image-2`, `gpt-image-2.5-flare`, or `gpt-image-2.5-sunburst`. Select the 2.5 variants explicitly with `--model`; existing gpt-image-2 workers remain compatible. Use `AIFORALL_IMAGE15_API_KEY`, JSON `AIFORALL_IMAGE15_API_KEYS`, or `--add-native-worker-key` only for `gpt-image-1.5`.
 5. Before a batch, warn that accepted cloud requests may still be billed after a local crash, then run `--dry-run` and `--limit 1` where supported.
 6. When invoking the script through a shell tool, set the command execution timeout to at least 360 seconds and at least 60 seconds longer than the configured API timeout. The plugin's API timeout defaults to 300 seconds; `AIFORALL_REQUEST_TIMEOUT_SECONDS` may increase it but never reduce it below 300 seconds.
 
@@ -26,13 +26,13 @@ The current Codex model compiles the prompt. Preserve exact names, quoted text, 
 
 ## Generate
 
-Default to one `gpt-image-2` request, `quality=medium`, `size=auto`, PNG output, and the current project's `aiforall-image-gen/` directory.
+Default to one `gpt-image-2` request, `quality=medium`, `size=auto`, PNG output, and the current project's `aiforall-image-gen/` directory. Use `--model gpt-image-2.5-flare` or `--model gpt-image-2.5-sunburst` to opt into the new variants.
 
 ```powershell
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --prompt "<PROMPT>"
 ```
 
-Use `--size WIDTHxHEIGHT` when exact dimensions are requested. `gpt-image-2` requires max edge 3840, both edges divisible by 16, ratio at most 3:1, and 655,360 to 8,294,400 total pixels. Use `--aspect` only as a 2K convenience mapping and never combine it with `--size`.
+Use `--size WIDTHxHEIGHT` when exact dimensions are requested. The primary models require max edge 3840, both edges divisible by 16, ratio at most 3:1, and 655,360 to 8,294,400 total pixels. Use `--aspect` only as a 2K convenience mapping and never combine it with `--size`.
 
 ## Transparent output
 

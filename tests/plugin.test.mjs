@@ -96,6 +96,27 @@ test("generation uses the aiforall Images route and current-project output direc
   assert.ok(readdirSync(outputDir).some((name) => name.endsWith(".png")));
 });
 
+for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]) {
+  test(`${model} routes through the primary worker and sends the selected model`, async () => {
+    const cwd = mkdtempSync(join(tmpdir(), `aiforall-${model}-test-`));
+    let captured = null;
+    await withMockServer(async (request, response) => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      captured = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: [{ b64_json: onePixelPng }] }));
+    }, async (apiRoot) => {
+      const result = await runCli(["--model", model, "--prompt", "primary 2.5 model", "--no-resize"], {
+        cwd,
+        env: { AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+      });
+      assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    });
+    assert.equal(captured.model, model);
+  });
+}
+
 test("one API key can run multiple generation requests concurrently", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "aiforall-single-key-concurrency-test-"));
   let active = 0;

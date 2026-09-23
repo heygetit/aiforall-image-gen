@@ -13,8 +13,11 @@ const API_ROOT = process.env.NODE_ENV === "test" && process.env.AIFORALL_IMAGE_G
 const IMAGES_GENERATIONS_URL = `${API_ROOT}/v1/images/generations`;
 const IMAGES_EDITS_URL = `${API_ROOT}/v1/images/edits`;
 const IMAGE_MODEL = "gpt-image-2";
+const IMAGE_25_FLARE_MODEL = "gpt-image-2.5-flare";
+const IMAGE_25_SUNBURST_MODEL = "gpt-image-2.5-sunburst";
 const NATIVE_TRANSPARENT_MODEL = "gpt-image-1.5";
-const SUPPORTED_MODELS = new Set([IMAGE_MODEL, NATIVE_TRANSPARENT_MODEL]);
+const PRIMARY_IMAGE_MODELS = [IMAGE_MODEL, IMAGE_25_FLARE_MODEL, IMAGE_25_SUNBURST_MODEL];
+const SUPPORTED_MODELS = new Set([...PRIMARY_IMAGE_MODELS, NATIVE_TRANSPARENT_MODEL]);
 const SUPPORTED_QUALITIES = new Set(["low", "medium", "high", "auto"]);
 const SUPPORTED_OUTPUT_FORMATS = new Set(["png", "jpeg", "webp"]);
 const PYTHON_IMAGE_TOOL = join(dirname(fileURLToPath(import.meta.url)), "image_tools.py");
@@ -185,6 +188,10 @@ function normalizeWorkerModels(models, fallback = [IMAGE_MODEL]) {
   return normalized.length > 0 ? normalized : [...fallback];
 }
 
+function isPrimaryImageModel(model) {
+  return PRIMARY_IMAGE_MODELS.includes(String(model || "").trim());
+}
+
 function normalizeWorkerConcurrency(value, fallback = DEFAULT_KEY_CONCURRENCY) {
   const parsed = Number(value);
   const fallbackValue = Number.isFinite(Number(fallback)) ? Number(fallback) : DEFAULT_KEY_CONCURRENCY;
@@ -193,7 +200,11 @@ function normalizeWorkerConcurrency(value, fallback = DEFAULT_KEY_CONCURRENCY) {
 }
 
 function workerSupportsModel(worker, model) {
-  return normalizeWorkerModels(worker?.models).includes(model);
+  const models = normalizeWorkerModels(worker?.models);
+  // Records created before 2.5 support used gpt-image-2 as the generic primary
+  // worker marker. Keep those workers eligible for the two new primary routes;
+  // native transparency remains an explicit, separate capability.
+  return models.includes(model) || (isPrimaryImageModel(model) && models.includes(IMAGE_MODEL));
 }
 
 function nextWorkerId(workers) {
@@ -359,7 +370,7 @@ function withEnvironmentWorkers(config, env = process.env) {
     });
   };
 
-  addEnvironmentWorker(env.AIFORALL_API_KEY, DEFAULT_WORKER_NAME, [IMAGE_MODEL], "AIFORALL_API_KEY");
+  addEnvironmentWorker(env.AIFORALL_API_KEY, DEFAULT_WORKER_NAME, PRIMARY_IMAGE_MODELS, "AIFORALL_API_KEY");
   addEnvironmentWorker(env.AIFORALL_IMAGE15_API_KEY, "native-transparent", [NATIVE_TRANSPARENT_MODEL], "AIFORALL_IMAGE15_API_KEY");
   for (const [index, key] of parseEnvironmentKeyArray(env.AIFORALL_IMAGE15_API_KEYS).entries()) {
     addEnvironmentWorker(key, `native-transparent-${index + 1}`, [NATIVE_TRANSPARENT_MODEL], "AIFORALL_IMAGE15_API_KEYS");
@@ -502,7 +513,7 @@ function normalizeQuality(quality) {
 function normalizeModel(model, nativeTransparent = false) {
   const normalized = String(nativeTransparent ? NATIVE_TRANSPARENT_MODEL : model || IMAGE_MODEL).trim();
   if (!SUPPORTED_MODELS.has(normalized)) {
-    throw new Error(`Invalid model="${model}". Use ${IMAGE_MODEL} or ${NATIVE_TRANSPARENT_MODEL}.`);
+    throw new Error(`Invalid model="${model}". Use ${PRIMARY_IMAGE_MODELS.join(", ")} or ${NATIVE_TRANSPARENT_MODEL}.`);
   }
   return normalized;
 }
@@ -3698,7 +3709,7 @@ CONFIG
 
 FIRST USE
   runtime: Node.js 18+; Python 3 + Pillow for image validation, resizing, masks, and chroma-key transparency
-  credentials: AIFORALL_API_KEY for gpt-image-2; AIFORALL_IMAGE15_API_KEY or JSON AIFORALL_IMAGE15_API_KEYS for gpt-image-1.5
+  credentials: AIFORALL_API_KEY for ${PRIMARY_IMAGE_MODELS.join(", ")}; AIFORALL_IMAGE15_API_KEY or JSON AIFORALL_IMAGE15_API_KEYS for gpt-image-1.5
   request timeout: ${REQUEST_TIMEOUT_MS / 1000}s; AIFORALL_REQUEST_TIMEOUT_SECONDS may increase it but cannot reduce it below ${MIN_REQUEST_TIMEOUT_MS / 1000}s
   create one or more image-generation group keys at https://aiforall.me/
   recommended: one key supports ${DEFAULT_KEY_CONCURRENCY} concurrent requests by default; add distinct keys for more aggregate capacity
@@ -3748,7 +3759,7 @@ DEFAULTS
   edit endpoint: ${IMAGES_EDITS_URL}
   image model: ${IMAGE_MODEL}
   API mode: aiforall.me Images API; no separate GPT text-model request
-  models: ${IMAGE_MODEL} default; ${NATIVE_TRANSPARENT_MODEL} only when explicitly selected
+  models: ${IMAGE_MODEL} default; ${IMAGE_25_FLARE_MODEL} and ${IMAGE_25_SUNBURST_MODEL} are explicit primary-model variants; ${NATIVE_TRANSPARENT_MODEL} only when explicitly selected
   native alpha: aiforall.me currently rejects background=transparent for ${NATIVE_TRANSPARENT_MODEL}; --native-transparent probes this capability and never falls back automatically
   request quality: ${DEFAULTS.quality}; low, medium, high, or auto
   output: <current working directory>/aiforall-image-gen
@@ -3764,7 +3775,7 @@ RATIOS
   aliases: square=1:1, landscape=4:3, portrait=3:4
 
 SIZE
-  gpt-image-2: auto or WxH; max edge 3840, multiples of 16, ratio <= 3:1, 655360..8294400 total pixels
+  ${PRIMARY_IMAGE_MODELS.join(" / ")}: auto or WxH; max edge 3840, multiples of 16, ratio <= 3:1, 655360..8294400 total pixels
   gpt-image-1.5: auto, 1024x1024, 1024x1536, or 1536x1024
   --aspect/--ratio maps to a 2K convenience size; do not combine it with --size.`);
 }
@@ -3777,8 +3788,8 @@ function resolveGenerationParams(flags, modeConfig) {
     throw new Error("Use either --transparent or --native-transparent, not both.");
   }
   const model = normalizeModel(flags.model || modeConfig?.model, flags.nativeTransparent === true);
-  if (flags.preview === true && model !== IMAGE_MODEL) {
-    throw new Error("--preview is supported only for a single gpt-image-2 text-to-image request.");
+  if (flags.preview === true && !isPrimaryImageModel(model)) {
+    throw new Error(`--preview is supported only for a single ${PRIMARY_IMAGE_MODELS.join("/")} text-to-image request.`);
   }
   const quality = normalizeQuality(flags.quality || modeConfig?.quality || DEFAULTS.quality);
   const outputFormat = normalizeOutputFormat(flags.outputFormat || modeConfig?.outputFormat, flags.nativeTransparent === true || flags.transparent === true);

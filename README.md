@@ -2,7 +2,7 @@
 
 `aiforall.me` 官方 Codex 图像生成插件。默认通过
 `https://aiforall.me/v1/images/generations` 和 `/v1/images/edits`
-调用 `gpt-image-2`，支持灵活尺寸、图像编辑、透明背景、SSE 预览、批量任务、断点续跑、单 Key 多槽位并发和最多 10 个 worker。
+调用 `gpt-image-2`，并支持显式选择 `gpt-image-2.5-flare` 或 `gpt-image-2.5-sunburst`，支持灵活尺寸、图像编辑、透明背景、SSE 预览、批量任务、断点续跑、单 Key 多槽位并发和最多 10 个 worker。
 
 ## 环境
 
@@ -42,6 +42,13 @@ codex plugin add aiforall-image-gen@aiforall-plugins
 ```powershell
 $env:AIFORALL_API_KEY="<YOUR_AIFORALL_IMAGE_KEY>"
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --get-config
+```
+
+选择 2.5 模型（仍使用主 `AIFORALL_API_KEY` worker）：
+
+```powershell
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --model gpt-image-2.5-flare --prompt "..."
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --model gpt-image-2.5-sunburst --prompt "..."
 ```
 
 单次 Images API 请求默认等待 `300` 秒。网络较慢时可继续调高，但不能降低到 300 秒以下：
