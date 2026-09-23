@@ -51,6 +51,19 @@ node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --model gpt-image-2
 node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --model gpt-image-2.5-sunburst --prompt "..."
 ```
 
+将模型设为之后普通生图、编辑和批量任务的默认模型（写入插件私有配置）：
+
+```powershell
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --set-default-model gpt-image-2.5-sunburst
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --get-config
+```
+
+设置后，未显式传入 `--model` 的普通生图、编辑、批量和已保存模式都会使用该模型；显式 `--model` 优先。恢复默认 `gpt-image-2`：
+
+```powershell
+node "$HOME\plugins\aiforall-image-gen\scripts\generate.mjs" --clear-default-model
+```
+
 单次 Images API 请求默认等待 `300` 秒。网络较慢时可继续调高，但不能降低到 300 秒以下：
 
 ```powershell

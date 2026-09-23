@@ -57,6 +57,41 @@ test("AIFORALL_API_KEY is masked and marked as the environment source", async ()
   assert.doesNotMatch(result.stdout, /sk-aiforall-test-secret/);
 });
 
+test("persistent default model is used when --model is omitted and explicit model wins", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aiforall-default-model-test-"));
+  const codexHome = join(cwd, ".codex");
+  const setResult = await runCli(["--set-default-model", "gpt-image-2.5-sunburst"], {
+    cwd,
+    env: { CODEX_HOME: codexHome },
+  });
+  assert.equal(setResult.code, 0, setResult.stderr);
+  assert.match(setResult.stdout, /gpt-image-2\.5-sunburst/);
+  const seen = [];
+  await withMockServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    seen.push(JSON.parse(Buffer.concat(chunks).toString("utf8")).model);
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: [{ b64_json: onePixelPng }] }));
+  }, async (apiRoot) => {
+    const inherited = await runCli(["--prompt", "uses saved model", "--no-resize"], {
+      cwd,
+      env: { CODEX_HOME: codexHome, AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.equal(inherited.code, 0, `${inherited.stdout}\n${inherited.stderr}`);
+    const explicit = await runCli(["--model", "gpt-image-2.5-flare", "--prompt", "explicit override", "--no-resize"], {
+      cwd,
+      env: { CODEX_HOME: codexHome, AIFORALL_IMAGE_GEN_TEST_API_ROOT: apiRoot },
+    });
+    assert.equal(explicit.code, 0, `${explicit.stdout}\n${explicit.stderr}`);
+  });
+  assert.deepEqual(seen, ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]);
+  const summary = await runCli(["--get-config"], { cwd, env: { CODEX_HOME: codexHome } });
+  assert.match(summary.stdout, /"默认生图模型": "gpt-image-2\.5-sunburst"/);
+  const clearResult = await runCli(["--clear-default-model"], { cwd, env: { CODEX_HOME: codexHome } });
+  assert.equal(clearResult.code, 0, clearResult.stderr);
+});
+
 test("request timeout defaults to at least 300 seconds and allows a longer override", async () => {
   const clamped = await runCli(["--help"], { env: { AIFORALL_REQUEST_TIMEOUT_SECONDS: "30" } });
   assert.equal(clamped.code, 0, clamped.stderr);

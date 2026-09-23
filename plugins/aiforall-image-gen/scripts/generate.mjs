@@ -464,6 +464,7 @@ function buildConfigSummary(config) {
     密钥上限: MAX_WORKERS,
     是否超出上限: workers.length > MAX_WORKERS ? "是" : "否",
     默认传输: "aiforall.me Images API",
+    默认生图模型: config?.defaultModel || IMAGE_MODEL,
     密钥列表: workers.map(summarizeWorker),
     快速模式: config?.quickMode || null,
     批量模式: config?.batchMode || null,
@@ -514,6 +515,14 @@ function normalizeModel(model, nativeTransparent = false) {
   const normalized = String(nativeTransparent ? NATIVE_TRANSPARENT_MODEL : model || IMAGE_MODEL).trim();
   if (!SUPPORTED_MODELS.has(normalized)) {
     throw new Error(`Invalid model="${model}". Use ${PRIMARY_IMAGE_MODELS.join(", ")} or ${NATIVE_TRANSPARENT_MODEL}.`);
+  }
+  return normalized;
+}
+
+function normalizeDefaultModel(model) {
+  const normalized = normalizeModel(model, false);
+  if (!isPrimaryImageModel(normalized)) {
+    throw new Error(`The persistent default model must be one of ${PRIMARY_IMAGE_MODELS.join(", ")}; gpt-image-1.5 is explicit-only.`);
   }
   return normalized;
 }
@@ -3591,6 +3600,8 @@ function parseArgs(argv) {
   while (i < argv.length) {
     const value = argv[i];
     if (value === "--get-config") args.flags.getConfig = true;
+    else if (value === "--set-default-model" && argv[i + 1]) args.flags.setDefaultModel = argv[++i];
+    else if (value === "--clear-default-model") args.flags.clearDefaultModel = true;
     else if (value === "--list-workers") args.flags.listWorkers = true;
     else if (value === "--set-key" && argv[i + 1]) args.flags.setKey = argv[++i];
     else if (value === "--add-worker-key" && argv[i + 1]) args.flags.addWorkerKey = argv[++i];
@@ -3695,6 +3706,8 @@ function printUsage() {
 
 CONFIG
   --get-config
+  --set-default-model <${PRIMARY_IMAGE_MODELS.join("| ")}>
+  --clear-default-model
   --list-workers
   --set-key <YOUR_AIFORALL_IMAGE_KEY>
   --add-worker-key <ANOTHER_AIFORALL_IMAGE_KEY> [--worker-name <name>]
@@ -3780,14 +3793,14 @@ SIZE
   --aspect/--ratio maps to a 2K convenience size; do not combine it with --size.`);
 }
 
-function resolveGenerationParams(flags, modeConfig) {
+function resolveGenerationParams(flags, modeConfig, defaultModel = null) {
   if (flags.size && (flags.aspect || flags.ratio)) {
     throw new Error("Use either --size or --aspect/--ratio, not both.");
   }
   if (flags.transparent && flags.nativeTransparent) {
     throw new Error("Use either --transparent or --native-transparent, not both.");
   }
-  const model = normalizeModel(flags.model || modeConfig?.model, flags.nativeTransparent === true);
+  const model = normalizeModel(flags.model || defaultModel || modeConfig?.model, flags.nativeTransparent === true);
   if (flags.preview === true && !isPrimaryImageModel(model)) {
     throw new Error(`--preview is supported only for a single ${PRIMARY_IMAGE_MODELS.join("/")} text-to-image request.`);
   }
@@ -3860,6 +3873,27 @@ async function main() {
 
   if (flags.listWorkers) {
     printWorkerList(config);
+    return;
+  }
+
+  if (flags.setDefaultModel || flags.clearDefaultModel) {
+    const mutableConfig = storedConfig;
+    if (flags.clearDefaultModel) {
+      delete mutableConfig.defaultModel;
+      saveConfig(mutableConfig);
+      console.log(`Default image model cleared; using ${IMAGE_MODEL}.`);
+      return;
+    }
+    let defaultModel;
+    try {
+      defaultModel = normalizeDefaultModel(flags.setDefaultModel);
+    } catch (error) {
+      console.error(`ERROR: ${error?.message || String(error)}`);
+      process.exit(1);
+    }
+    mutableConfig.defaultModel = defaultModel;
+    saveConfig(mutableConfig);
+    console.log(`Default image model saved: ${defaultModel}`);
     return;
   }
 
@@ -3988,7 +4022,7 @@ async function main() {
   if (flags.setQuickMode) {
     const mutableConfig = storedConfig;
     const previous = mutableConfig.quickMode || {};
-    const { model, quality, ratio, size, outputFormat } = resolveGenerationParams(flags, previous);
+    const { model, quality, ratio, size, outputFormat } = resolveGenerationParams(flags, previous, mutableConfig.defaultModel);
     const count = clampInteger(flags.count ?? previous.count, 1, MAX_GENERATION_COUNT, DEFAULTS.count);
     mutableConfig.quickMode = { model, quality, ratio, size, outputFormat, count };
     saveConfig(mutableConfig);
@@ -3999,7 +4033,7 @@ async function main() {
   if (flags.setBatchMode) {
     const mutableConfig = storedConfig;
     const previous = mutableConfig.batchMode || {};
-    const { model, quality, ratio, size, outputFormat } = resolveGenerationParams(flags, previous);
+    const { model, quality, ratio, size, outputFormat } = resolveGenerationParams(flags, previous, mutableConfig.defaultModel);
     const concurrency = clampInteger(flags.concurrency ?? previous.concurrency, 1, MAX_CONCURRENCY, DEFAULTS.concurrency);
     mutableConfig.batchMode = { model, quality, ratio, size, outputFormat, concurrency };
     saveConfig(mutableConfig);
@@ -4008,7 +4042,7 @@ async function main() {
   }
 
   if (flags.resolveSize) {
-    const { quality, ratio, size, explicitSize } = resolveGenerationParams(flags, config.quickMode);
+    const { quality, ratio, size, explicitSize } = resolveGenerationParams(flags, config.quickMode, config.defaultModel);
     console.log(JSON.stringify({ quality, ratio, size, explicitSize }, null, 2));
     return;
   }
@@ -4057,7 +4091,7 @@ async function main() {
       process.exit(1);
     }
     const workflowAspect = flags.aspect ?? flags.ratio ?? "9:16";
-    const { ratio, size } = resolveGenerationParams({ ...flags, size: undefined, aspect: workflowAspect }, { quality: DEFAULTS.quality, ratio: workflowAspect });
+    const { ratio, size } = resolveGenerationParams({ ...flags, size: undefined, aspect: workflowAspect }, { quality: DEFAULTS.quality, ratio: workflowAspect }, config.defaultModel);
     const limitExplicit = flags.limit != null;
     const limit = clampInteger(flags.limit, 1, 1000, WORKFLOW_DEFAULT_LIMIT);
     const concurrency = clampInteger(flags.concurrency ?? MAX_CONCURRENCY, 1, MAX_CONCURRENCY, Math.min(MAX_CONCURRENCY, DEFAULTS.concurrency));
@@ -4103,7 +4137,7 @@ async function main() {
     }
     const limit = clampInteger(flags.limit, 1, 1000, NAIL_STRESS_DEFAULT_LIMIT);
     const concurrency = clampInteger(flags.concurrency ?? MAX_CONCURRENCY, 1, MAX_CONCURRENCY, Math.min(MAX_CONCURRENCY, DEFAULTS.concurrency));
-    const { size } = resolveGenerationParams({ ...flags, size: undefined, aspect: "9:16" }, { quality: DEFAULTS.quality, ratio: "9:16" });
+    const { size } = resolveGenerationParams({ ...flags, size: undefined, aspect: "9:16" }, { quality: DEFAULTS.quality, ratio: "9:16" }, config.defaultModel);
     const transport = resolveRunTransport(requestedTransport, true);
     console.log(`Transport: ${transport} (batch preset)`);
     const result = await runNailStressTest(configuredWorkers, {
@@ -4146,7 +4180,7 @@ async function main() {
       console.error("ERROR: Image-to-image uses /v1/images/edits only; legacy Responses edit routes are disabled.");
       process.exit(1);
     }
-    const params = resolveGenerationParams(flags, config.quickMode);
+    const params = resolveGenerationParams(flags, config.quickMode, config.defaultModel);
     const configuredWorkers = getEnabledWorkersOrExit(config, params.model);
     const { size } = params;
     if (flags.imageRoles?.length && flags.imageRoles.length !== images.length) {
@@ -4258,7 +4292,7 @@ async function main() {
     process.exit(1);
   }
   const modeConfig = isBatch ? config.batchMode : config.quickMode;
-  const params = resolveGenerationParams(flags, modeConfig);
+  const params = resolveGenerationParams(flags, modeConfig, config.defaultModel);
   const configuredWorkers = getEnabledWorkersOrExit(config, params.model);
   const { size } = params;
 
